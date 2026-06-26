@@ -122,6 +122,33 @@ if [ -z "$TYPES" ]; then
   TYPES="feature|fix|refactor|chore|docs|test|spike|ci|build|perf|sync"
 fi
 
+# When there is NO tracker (tracker.kind = none), branches don't carry ticket
+# IDs — accept the shape {type}/{description} without one. Full ticket-ID
+# enforcement is retained for every other kind. Same principle as the
+# kind=none relaxation in validate-pr-create.sh. config_get_or is available
+# from _lib-read-config.sh sourced above.
+BRANCH_TRACKER_KIND="gh"
+if command -v config_get_or >/dev/null 2>&1; then
+  # tr -d strips any trailing CR — on Windows the jq-based reader can emit
+  # CRLF, and a trailing \r would make the "none" comparison below fail.
+  BRANCH_TRACKER_KIND=$(config_get_or '.tracker.kind' 'gh' 2>/dev/null | tr -d '\r\n')
+fi
+if [ "$BRANCH_TRACKER_KIND" = "none" ]; then
+  if echo "$CURRENT_BRANCH" | grep -qE "^(${TYPES})/.+"; then
+    exit 0
+  fi
+  cat >&2 <<MSG
+BLOCKED: Branch '$CURRENT_BRANCH' doesn't follow naming convention.
+
+Required shape (no tracker configured — .tracker.kind = none):
+  {type}/{description}
+
+Accepted types: ${TYPES//|/, }
+  (configurable: .claude/project-config.*.json → .branch.type_whitelist)
+MSG
+  exit 2
+fi
+
 # Load the ticket-ID regex from the tracker lib. The pattern is shape-only
 # (no existence check at the push gate — that's validate-pr-create.sh's job).
 # Default covers GH `#123` / `GH-123` plus enterprise prefixes (LIN, JIRA,

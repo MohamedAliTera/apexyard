@@ -106,9 +106,31 @@ if [ -z "$PR_TYPES" ]; then
   PR_TYPES="feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert|release|spike|sync"
 fi
 
+# Resolve tracker kind early. When there is NO tracker (tracker.kind = none),
+# ticket IDs don't exist, so PR titles + branches are NOT required to carry one
+# — adopters use plain conventional-commit form with an optional descriptive
+# scope (e.g. `feat(demo-store): …`). Ticket-ID enforcement is retained intact
+# for every other kind (gh / linear / jira / asana / custom).
+PR_TRACKER_KIND="gh"
+if [ -f "$HOOK_DIR/_lib-read-config.sh" ]; then
+  # shellcheck disable=SC1090,SC1091
+  . "$HOOK_DIR/_lib-read-config.sh"
+  # tr -d strips any trailing CR — on Windows the jq-based reader can emit
+  # CRLF, and a trailing \r would make the "none" comparison below fail.
+  PR_TRACKER_KIND=$(config_get_or '.tracker.kind' 'gh' 2>/dev/null | tr -d '\r\n')
+fi
+
 TICKET_REF=""
 if [ -n "$TITLE" ]; then
-  if ! echo "$TITLE" | grep -qE "^(${PR_TYPES})\(([A-Z]{2,10}-[0-9]+|#[0-9]+)\)!?:"; then
+  if [ "$PR_TRACKER_KIND" = "none" ]; then
+    # No tracker → accept `type: …` or `type(scope): …` with a free-form,
+    # optional scope (no ticket-ID shape required). TICKET_REF stays empty,
+    # so the ticket-existence block below is skipped.
+    if ! echo "$TITLE" | grep -qE "^(${PR_TYPES})(\([^)]+\))?!?:"; then
+      ERRORS="${ERRORS}PR title '$TITLE' doesn't match format: type: description  (or  type(scope): description)\n"
+      ERRORS="${ERRORS}Accepted types (from .claude/project-config.*.json → .pr.title_type_whitelist): ${PR_TYPES//|/, }\n"
+    fi
+  elif ! echo "$TITLE" | grep -qE "^(${PR_TYPES})\(([A-Z]{2,10}-[0-9]+|#[0-9]+)\)!?:"; then
     ERRORS="${ERRORS}PR title '$TITLE' doesn't match format: type(TICKET-ID): description\n"
     ERRORS="${ERRORS}Accepted types (from .claude/project-config.*.json → .pr.title_type_whitelist): ${PR_TYPES//|/, }\n"
   else
@@ -337,6 +359,10 @@ fi
 # `<!-- pr-sections: skip -->`.
 BODY_CONTENT=""
 BODY_FILE=$(echo "$COMMAND" | sed -nE 's/.*--body-file[[:space:]]+([^[:space:]]+).*/\1/p' | head -1)
+# Strip surrounding quotes — a quoted path (`--body-file "C:/.../body.md"`) is
+# captured WITH the quotes by the non-space extractor above, so the -f test
+# would fail and the body would read as empty (false "missing sections").
+BODY_FILE=$(printf '%s' "$BODY_FILE" | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//")
 if [ -n "$BODY_FILE" ] && [ -f "$BODY_FILE" ]; then
   BODY_CONTENT=$(cat "$BODY_FILE")
 fi
@@ -507,7 +533,7 @@ elif [ -n "$BRANCH_DIR" ]; then
 else
   CURRENT_BRANCH=$(git branch --show-current 2>/dev/null)
 fi
-if [ -n "$CURRENT_BRANCH" ] && [ "$CURRENT_BRANCH" != "main" ] && [ "$CURRENT_BRANCH" != "master" ]; then
+if [ "$PR_TRACKER_KIND" != "none" ] && [ -n "$CURRENT_BRANCH" ] && [ "$CURRENT_BRANCH" != "main" ] && [ "$CURRENT_BRANCH" != "master" ]; then
   # Release-cut branches are exempt — same recognition `validate-branch-name.sh`
   # added in me2resh/apexyard#168 / #169. Release branches don't carry a
   # ticket-id because the release itself is the ticket. The /release-sync
